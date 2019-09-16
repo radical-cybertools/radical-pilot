@@ -508,12 +508,11 @@ class AgentSchedulingComponent(rpu.Component):
         #   - pulling new tasks to schedule; and
         #   - pulling for free slots to use.
         #
-        # new_resources = True  # fresh start
-        # any_resources = True  # fresh start  (TODO: we don'thave this)
+        # resources = True  # fresh start
         #
         # while True:
         #
-        #   if new_resources:  # otherwise: why bother?
+        #   if resources:  # otherwise: why bother?
         #     if waitlist:
         #       sort(waitlist)  # largest tasks first
         #       for task in sorted(waitlist):
@@ -536,38 +535,152 @@ class AgentSchedulingComponent(rpu.Component):
         #           max_task = max(max_task, size(task))
         #         continue  # next task mght be smaller
         #
-        #   new_resources = False  # nothing in waitlist fits
+        #   resources = False  # nothing in waitlist fits
         #   for slot in queue_slots.get():
         #     free_slot(slot)
-        #     new_resources = True  # maybe we can place a task now
+        #     resources = True  # maybe we can place a task now
 
 
         # register unit output channels
         self.register_output(rps.AGENT_EXECUTING_PENDING,
                              rpc.AGENT_EXECUTING_QUEUE)
 
-        new_resources = True  # fresh start
+        resources = True  # fresh start
         while not self._proc_term.is_set():
 
-            # attempt to schedule waiting units (if we have new resources)
-            if new_resources:
-                self._schedule_waitlist()
+            active = ''  # see if we do anything in this iteration
 
-                # check if any units remain waiting, which means we lack
-                # resources to run them
-                if sum([len(self._waitpool[x]) for x in self._waitpool]):
-                    new_resources = False
+            # if we have new resources, try to place waiting tasks
+            if resources:
+                a, r = self._schedule_waitlist()
+                if not r: resources  = False
+                if     a: active    += 'w'
 
-            # check if there are new units to be scheduled
-            self._schedule_incoming()
+            # always try to schedule newly incoming tasks
+            a, r = self._schedule_incoming()
+            if not r: resources  = False
+            if     a: active    += 's'
 
-            # check if resources can be freed via unschedule
-            if self._unschedule_completed():
-                new_resources = True
+            # reclaim resources from completed tasks
+            a, r = self._unschedule_completed()
+            if r: resources  = True
+            if a: active    += 'u'
 
-            if not new_resources:
-                # not much to do
-                time.sleep(0.1)
+            if not active:
+                time.sleep(0.1)  # FIXME: configurable
+
+
+    # --------------------------------------------------------------------------
+    #
+    def _schedule_waitlist(self):
+
+        self.slot_status("before schedule waitlist")
+
+        # cycle through waitlist, and see if we get anything placed now.
+        #
+        # sort by inverse tuple size to place larger tasks first and backfill
+        # with smaller tasks.  We only look at cores right now - this needs
+        # fixing for GPU dominated loads.
+
+        scheduled   = list()
+        unscheduled = dict()
+        for ts in sorted(self._waitpool, reverse=True):
+
+            for unit in self._waitpool[ts]:
+
+                if self._try_allocation(unit):
+                    scheduled.append(unit)
+
+                else:
+                    if ts not in unscheduled:
+                        unscheduled[ts] = list()
+                    unscheduled[ts].append(unit)
+
+        self.advance(scheduled, rps.AGENT_EXECUTING_PENDING,
+                                publish=True, push=True)
+
+        if scheduled:
+            active = True
+            self.slot_status("after schedule waitlist")
+        else:
+            active = False
+
+        self._waitpool = unscheduled
+
+        # signal resource shortage if anything remains unscheduled
+        if sum([len(self._waitpool[x]) for x in self._waitpool]):
+            resources = False
+        else:
+            resources = True
+
+        return active, resources
+
+
+    # --------------------------------------------------------------------------
+    #
+    def _schedule_incoming(self):
+
+        # fetch all units from the queue
+        units = list()
+        try:
+
+            while not self._proc_term.is_set():
+                data = self._queue_sched.get(timeout=0.001)
+
+                if not isinstance(data, list):
+                    data = [data]
+
+                for unit in data:
+                    self._set_tuple_size(unit)
+                    units.append(unit)
+
+        except queue.Empty:
+            # no more unschedule requests
+            pass
+
+        if not units:
+            # no activity, resources remain
+            self._prof.prof('tmp_sched_break')
+            return False, True
+
+        self.slot_status("before schedule incoming [%d]" % len(units))
+
+        # handle largest units first
+        # FIXME: this needs lazy-bisect
+        to_wait = list()
+        for unit in sorted(units, key=lambda x: x['tuple_size'][0],
+                                  reverse=True):
+
+            # either we can place the unit straight away, or we have to
+            # put it in the wait pool.
+            if self._try_allocation(unit):
+
+                # task got scheduled - advance state, notify world about the
+                # state change, and push it out toward the next component.
+                self.advance(unit, rps.AGENT_EXECUTING_PENDING,
+                                   publish=True, push=True)
+
+            else:
+                to_wait.append(unit)
+
+        for unit in to_wait:
+
+            # all units which could not be scheduled get added to the waitpool,
+            # but binned by size, so that we can later lookup units by size if
+            # we happen to have slots for that size available (see
+            # `unschedule_unit()`).
+            ts = tuple(unit['tuple_size'])
+            if ts not in self._waitpool:
+                self._waitpool[ts] = list()
+            self._waitpool[ts].append(unit)
+
+        # we performed some activity (worked on units)
+        active = True
+
+        # if units remain waiting, we are out of usable resources
+        resources = not bool(to_wait)
+
+        return active, resources  # still should have resources left
 
 
     # --------------------------------------------------------------------------
@@ -626,96 +739,6 @@ class AgentSchedulingComponent(rpu.Component):
             self._prof.prof('unschedule_stop', uid=unit['uid'])
 
         return True
-
-
-
-    # --------------------------------------------------------------------------
-    #
-    def _schedule_incoming(self):
-
-        # fetch all units from the queue
-        units = list()
-        try:
-
-            while not self._proc_term.is_set():
-                data = self._queue_sched.get(timeout=0.001)
-
-                if not isinstance(data, list):
-                    data = [data]
-
-                for unit in data:
-                    self._set_tuple_size(unit)
-                    units.append(unit)
-
-        except queue.Empty:
-            # no more unschedule requests
-            pass
-
-        if not units:
-            return
-
-        self.slot_status("before schedule incoming [%d]" % len(units))
-
-        # handle largest units first
-        # FIXME: this needs lazy-bisect
-        to_wait = list()
-        for unit in sorted(units, key=lambda x: x['tuple_size'][0],
-                                  reverse=True):
-
-            # either we can place the unit straight away, or we have to
-            # put it in the wait pool.
-            if self._try_allocation(unit):
-
-                # task got scheduled - advance state, notify world about the
-                # state change, and push it out toward the next component.
-                self.advance(unit, rps.AGENT_EXECUTING_PENDING,
-                                   publish=True, push=True)
-
-            else:
-                to_wait.append(unit)
-
-        for unit in to_wait:
-
-            # all units which could not be scheduled get added to the waitpool,
-            # but binned by size, so that we can later lookup units by size if
-            # we happen to have slots for that size available (see
-            # `unschedule_unit()`).
-            ts = tuple(unit['tuple_size'])
-            if ts not in self._waitpool:
-                self._waitpool[ts] = list()
-            self._waitpool[ts].append(unit)
-
-
-    # --------------------------------------------------------------------------
-    #
-    def _schedule_waitlist(self):
-
-      # self.slot_status("before schedule waitlist")
-
-        # cycle through waitlist, and see if we get anything placed now.
-        #
-        # sort by inverse tuple size to place larger tasks first and backfill
-        # with smaller tasks.  We only look at cores right now - this needs
-        # fixing for GPU dominated loads.
-
-        active = False
-        retain = dict()
-        for ts in sorted(self._waitpool, reverse=True):
-
-            retain[ts] = list()
-            for unit in self._waitpool[ts]:
-
-                if self._try_allocation(unit):
-                    active = True
-                    self.advance(unit, rps.AGENT_EXECUTING_PENDING,
-                                       publish=True, push=True)
-                else:
-                    retain[ts].append(unit)
-
-        if active:
-            self.slot_status("after schedule waitlist")
-
-        self._waitpool = retain
 
 
     # --------------------------------------------------------------------------
