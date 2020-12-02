@@ -150,6 +150,7 @@ class Worker(rpu.Component):
         pre_exec commands before spawning worker processes.
         '''
 
+        import time
         pass
 
 
@@ -188,10 +189,12 @@ class Worker(rpu.Component):
 
         if 'method' in data:
             to_call = getattr(self, data['method'], None)
+            self._log.debug('=== names: %s', dir(self))
 
         elif 'function' in data:
             names   = dict(list(globals().items()) + list(locals().items()))
             to_call = names.get(data['function'])
+            self._log.debug('=== names: %s', names)
 
         else:
             raise ValueError('no method or function specified: %s' % data)
@@ -280,13 +283,15 @@ class Worker(rpu.Component):
         try:
             import subprocess as sp
 
-            exe  = data['exe'],
-            args = data.get('args', []),
-            env  = data.get('env',  {}),
+            exe  = data['exe']
+            args = data.get('args', [])
+            env  = data.get('env',  {})
 
-            proc = sp.Popen(executable=exe, args=args,       env=env,
-                            stdin=None,     stdout=sp.PIPE, stderr=sp.PIPE,
-                            close_fds=True, shell=False)
+            argv = [exe] + args
+
+            proc = sp.Popen(args=argv,   env=env,
+                            shell=False, close_fds=True,
+                            stdin=None,  stdout=sp.PIPE, stderr=sp.PIPE)
             out, err = proc.communicate()
             ret      = proc.returncode
 

@@ -9,7 +9,7 @@ import radical.utils as ru
 #
 if __name__ == '__main__':
 
-    n     = 1024
+    n     = 56
     sbox  = os.environ['SBOX']
 
     c_in  = ru.Config(path='%s/funcs_req_queue.cfg' % sbox)
@@ -21,11 +21,12 @@ if __name__ == '__main__':
     q_in.put([
                [{'state'  : 'NEW',
                        'uid'    : 'request.%06d' % i,
-                       'mode'   : 'eval',
-                       'timeout': 10,
+                       'mode'   : 'exec',
+                       'timeout': 25,
                        'data'   : {
-                           'code'  : '%d * %d' % (i, i),
-                           'kwargs': {} }
+                           'exe' : '/bin/sleep',
+                           'args': ['20']
+                       }
                 } for i in range(n)]
              ])
 

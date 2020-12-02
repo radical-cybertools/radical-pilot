@@ -1,7 +1,7 @@
 
 {
     "kind"      : "worker",
-    "cores"     : 32,
+    "cores"     : 56,
     "gpus"      : 0,
     "base"      : "${SBOX}",
     "path"      : "${SBOX}",
