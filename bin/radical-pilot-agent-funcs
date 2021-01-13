@@ -152,7 +152,7 @@ class Executor(object):
 
                     if msg['cmd'] == 'term':
 
-                        sys.exit(0)
+                        break
 
                     else:
                         self._log.error('unknown command %s', msg)

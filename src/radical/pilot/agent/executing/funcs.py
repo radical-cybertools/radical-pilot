@@ -7,6 +7,7 @@ import os
 import stat
 import time
 import queue
+import atexit
 import threading as mt
 import subprocess
 
@@ -22,6 +23,21 @@ from .base           import AgentExecutingComponent
 
 
 # ------------------------------------------------------------------------------
+# 
+_pids = list()
+
+
+def _kill():
+    for pid in _pids:
+        try   : os.killpg(pid, signal.SIGTERM)
+        except: pass
+
+atexit.register(_kill)
+# ------------------------------------------------------------------------------
+
+
+
+#-------------------------------------------------------------------------------
 #
 class FUNCS(AgentExecutingComponent) :
 
@@ -54,8 +70,8 @@ class FUNCS(AgentExecutingComponent) :
         req_cfg = ru.read_json('funcs_req_queue.cfg')
         res_cfg = ru.read_json('funcs_res_queue.cfg')
 
-        self._req_queue = ru.zmq.Putter('funcs_req_queue', req_cfg['put'])
-        self._res_queue = ru.zmq.Getter('funcs_res_queue', res_cfg['get'])
+        self._req_queue  = ru.zmq.Putter('funcs_req_queue', req_cfg['put'])
+        self._res_queue  = ru.zmq.Getter('funcs_res_queue', res_cfg['get'])
 
         self._cancel_lock    = ru.RLock()
         self._cus_to_cancel  = list()
@@ -190,7 +206,9 @@ class FUNCS(AgentExecutingComponent) :
                                          cwd        = sandbox)
 
         self._prof.prof('exec_ok', uid=funcs['uid'])
-
+        
+        # store pid for last-effort termination
+        _pids.append(funcs['proc'].pid)
 
     # --------------------------------------------------------------------------
     #
